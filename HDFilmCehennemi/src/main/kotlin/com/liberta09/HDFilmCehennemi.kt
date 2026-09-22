@@ -243,24 +243,39 @@ class HDFilmCehennemi : MainAPI() {
     }
 
     private suspend fun invokeLocalSource(source: String, url: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        val script = app.get(url, referer = "${mainUrl}/", interceptor = interceptor).document.select("script").find { it.data().contains("sources:") }?.data() ?: return
+        Log.d("HDCH", "invokeLocalSource: Fetching embed URL: $url")
+        val doc = app.get(url, referer = "${mainUrl}/", interceptor = interceptor).document
+        val script = doc.select("script").find { it.data().contains("sources:") }?.data()
+        if (script == null) {
+            Log.d("HDCH", "invokeLocalSource: No script containing 'sources:' found for url: $url")
+            return
+        }
+
         val unpackedScript = getAndUnpack(script)
-        val decryptedUrl = decryptLocalUrl(unpackedScript) ?: return
-        val lastUrl = decryptedUrl.substringAfter("https").let { "https$it" }
-        val subData = script.substringAfter("tracks: [").substringBefore("]")
-        
-        AppUtils.tryParseJson<List<SubSource>>("[${subData}]")?.filter { it.kind == "captions"}?.forEach {
-            val subtitleUrl = "${mainUrl}${it.file}/"
-            val headers = mapOf(
-                "Accept" to "*/*",
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0"
-            )
-            val subtitleResponse = app.get(subtitleUrl, headers = headers, allowRedirects = true, interceptor = interceptor)
-            if (subtitleResponse.isSuccessful) {
-                subtitleCallback(newSubtitleFile(it.language.toString(), subtitleUrl))
+        val decryptedUrl = decryptLocalUrl(unpackedScript)
+        var lastUrl = decryptedUrl?.substringAfter("https")?.let { "https$it" }
+
+        if (lastUrl.isNullOrEmpty()) {
+            val directM3u8 = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(script)?.groupValues?.get(1)
+                ?: Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(unpackedScript)?.groupValues?.get(1)
+            if (directM3u8 != null) {
+                lastUrl = directM3u8
             }
         }
-        
+
+        if (lastUrl.isNullOrEmpty()) {
+            Log.d("HDCH", "invokeLocalSource: Could not extract M3U8 video URL for $url")
+            return
+        }
+
+        Log.d("HDCH", "invokeLocalSource: Successfully extracted video URL: $lastUrl")
+
+        val subData = script.substringAfter("tracks: [").substringBefore("]")
+        AppUtils.tryParseJson<List<SubSource>>("[${subData}]")?.filter { it.kind == "captions" }?.forEach {
+            val subtitleUrl = fixUrlNull(it.file) ?: return@forEach
+            subtitleCallback(newSubtitleFile(it.language.toString(), subtitleUrl))
+        }
+
         callback.invoke(
             newExtractorLink(
                 source = source,
@@ -287,6 +302,7 @@ class HDFilmCehennemi : MainAPI() {
             element.select("button.alternative-link").map { button ->
                 button.text().replace("(HDrip Xbet)", "").trim() + " $langCode" to button.attr("data-video")
             }.forEach { (source, videoID) ->
+                if (videoID.isBlank()) return@forEach
                 val apiGet = app.get(
                     "${mainUrl}/video/$videoID/", interceptor = interceptor,
                     headers = mapOf(
@@ -295,15 +311,25 @@ class HDFilmCehennemi : MainAPI() {
                     ),
                     referer = data
                 ).text
-                
-                var iframe = Regex("""data-src=\\"([^"]+)""").find(apiGet)?.groupValues?.get(1)?.replace("\\", "") ?: ""
-                if (iframe.contains("rapidrame")) {
-                    iframe = "${mainUrl}/rplayer/" + iframe.substringAfter("?rapidrame_id=")
-                } else if (iframe.contains("mobi")) {
+
+                var iframe = Regex("""data-src=\\"([^"]+)""").find(apiGet)?.groupValues?.get(1)?.replace("\\", "")
+                    ?: Regex("""src=\\"([^"]+)""").find(apiGet)?.groupValues?.get(1)?.replace("\\", "")
+                    ?: ""
+
+                if (iframe.isEmpty()) {
                     val iframeDoc = Jsoup.parse(apiGet)
-                    iframe = fixUrlNull(iframeDoc.selectFirst("iframe")?.attr("data-src")) ?: return@forEach
+                    iframe = fixUrlNull(iframeDoc.selectFirst("iframe")?.attr("data-src") ?: iframeDoc.selectFirst("iframe")?.attr("src")) ?: ""
                 }
-                invokeLocalSource(source, iframe, subtitleCallback, callback)
+
+                if (iframe.isEmpty()) {
+                    Log.d("HDCH", "loadLinks: Could not find iframe URL for videoID: $videoID")
+                    return@forEach
+                }
+
+                val fullIframeUrl = fixUrlNull(iframe) ?: return@forEach
+                Log.d("HDCH", "loadLinks: Extracted embed iframe URL: $fullIframeUrl")
+
+                invokeLocalSource(source, fullIframeUrl, subtitleCallback, callback)
             }
         }
         return true
