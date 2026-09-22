@@ -1,5 +1,6 @@
 package com.liberta09
 
+import android.util.Base64
 import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.DeserializationFeature
@@ -15,6 +16,7 @@ import okhttp3.Interceptor
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import java.net.URI
 
 class HDFilmCehennemi : MainAPI() {
     override var mainUrl = "https://www.hdfilmcehennemi.nl"
@@ -208,7 +210,7 @@ class HDFilmCehennemi : MainAPI() {
                     "atob" -> {
                         var paddedResult = result
                         while (paddedResult.length % 4 != 0) paddedResult += "="
-                        result = String(android.util.Base64.decode(paddedResult, android.util.Base64.NO_WRAP), Charsets.ISO_8859_1)
+                        result = String(Base64.decode(paddedResult, Base64.NO_WRAP), Charsets.ISO_8859_1)
                     }
                     "rot" -> {
                         val rotShift = action.rotShift
@@ -242,24 +244,136 @@ class HDFilmCehennemi : MainAPI() {
         }
     }
 
+    private fun decryptHhr7n(w1rhList: List<String>): String? {
+        try {
+            val w1rh = w1rhList.toMutableList()
+            val p3kInitial = w1rh.size - 2
+            val yl5d = p3kInitial % 7
+            val o5c47 = 8 + (p3kInitial % 5)
+
+            if (o5c47 >= w1rh.size || yl5d >= w1rh.size - 1) return null
+
+            val ex7r1 = w1rh.removeAt(o5c47)
+            val l12c = w1rh.removeAt(yl5d)
+            var yl7o = w1rh.joinToString("")
+
+            if (ex7r1.length > 2048) {
+                yl7o = yl7o.reversed()
+            }
+
+            var j6285 = 0
+            var pu9wu = 0
+            for (j0vg in l12c.indices) {
+                val qg5 = l12c[j0vg].code
+                j6285 = (j6285 * 37 + qg5) % 241
+                pu9wu = (pu9wu + ((qg5 shl 1) xor j0vg)) and 255
+            }
+
+            val e4ik = (j6285 * 3 + pu9wu) % 256
+            val cnm5 = (pu9wu % 11) + 5
+            var qd8 = ((pu9wu * 251 + j6285) % 65519) + 1
+
+            for (j0vg in ex7r1.length - 1 downTo 0) {
+                val w8q = ex7r1[j0vg]
+                if (w8q == '7') {
+                    var padded = yl7o
+                    while (padded.length % 4 != 0) padded += "="
+                    yl7o = String(Base64.decode(padded, Base64.NO_WRAP), Charsets.ISO_8859_1)
+                } else if (w8q == '3') {
+                    yl7o = yl7o.reversed()
+                } else {
+                    val uve0 = (26 - ((w8q.code - 96) % 26)) % 26
+                    val sb = StringBuilder()
+                    for (c in yl7o) {
+                        if (c in 'a'..'z') {
+                            val base = 'a'.code
+                            val shifted = (c.code - base + uve0) % 26 + base
+                            sb.append(shifted.toChar())
+                        } else if (c in 'A'..'Z') {
+                            val base = 'A'.code
+                            val shifted = (c.code - base + uve0) % 26 + base
+                            sb.append(shifted.toChar())
+                        } else {
+                            sb.append(c)
+                        }
+                    }
+                    yl7o = sb.toString()
+                }
+            }
+
+            if (l12c.length > 4096) {
+                var padded = yl7o
+                while (padded.length % 4 != 0) padded += "="
+                yl7o = String(Base64.decode(padded, Base64.NO_WRAP), Charsets.ISO_8859_1)
+            }
+
+            val p3k = yl7o.length
+            val t27s9 = IntArray(p3k)
+            for (j0vg in p3k - 1 downTo 1) {
+                qd8 = (qd8 * 97 + 41) % 65519
+                t27s9[j0vg] = qd8 % (j0vg + 1)
+            }
+
+            val t9pi = yl7o.toCharArray()
+            for (j0vg in 1 until p3k) {
+                val w8fu = t27s9[j0vg]
+                val kz8 = t9pi[j0vg]
+                t9pi[j0vg] = t9pi[w8fu]
+                t9pi[w8fu] = kz8
+            }
+            yl7o = String(t9pi)
+
+            var z6l = e4ik
+            val p1j3 = StringBuilder()
+            for (j0vg in yl7o.indices) {
+                val qg5 = yl7o[j0vg].code
+                z6l = (z6l * 5 + cnm5) % 256
+                val decryptedChar = qg5 xor z6l
+                p1j3.append(decryptedChar.toChar())
+                z6l = (z6l + qg5) % 256
+            }
+
+            return p1j3.toString()
+        } catch (e: Exception) {
+            Log.e("HDCH", "decryptHhr7n Error: ${e.message}")
+            return null
+        }
+    }
+
     private suspend fun invokeLocalSource(source: String, url: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
         Log.d("HDCH", "invokeLocalSource: Fetching embed URL: $url")
-        val doc = app.get(url, referer = "${mainUrl}/", interceptor = interceptor).document
-        val script = doc.select("script").find { it.data().contains("sources:") }?.data()
-        if (script == null) {
-            Log.d("HDCH", "invokeLocalSource: No script containing 'sources:' found for url: $url")
-            return
+        val response = app.get(url, referer = "${mainUrl}/", interceptor = interceptor)
+        val doc = response.document
+        val scripts = doc.select("script").map { it.data() }
+        var lastUrl: String? = null
+
+        // 1. Try decryptHhr7n pattern (var tz9 = funcName("...".split("|")))
+        for (script in scripts) {
+            if (script.contains("tz9") || script.contains(".split(\"|\")") || script.contains(".split('|')")) {
+                val match = Regex("""var\s+tz9\s*=\s*[a-zA-Z0-9_$]+\s*\(\s*["']([^"']+)["']\s*\.split\s*\(\s*["']\|["']\s*\)\s*\)""").find(script)
+                if (match != null) {
+                    val pipeStr = match.groupValues[1]
+                    val decrypted = decryptHhr7n(pipeStr.split("|"))
+                    if (!decrypted.isNullOrEmpty() && decrypted.startsWith("http")) {
+                        lastUrl = decrypted
+                        Log.d("HDCH", "invokeLocalSource: Decrypted via Hhr7n: $lastUrl")
+                        break
+                    }
+                }
+            }
         }
 
-        val unpackedScript = getAndUnpack(script)
-        val decryptedUrl = decryptLocalUrl(unpackedScript)
-        var lastUrl = decryptedUrl?.substringAfter("https")?.let { "https$it" }
-
+        // 2. Fallback: try old decryptLocalUrl or unpacked script
         if (lastUrl.isNullOrEmpty()) {
-            val directM3u8 = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(script)?.groupValues?.get(1)
-                ?: Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(unpackedScript)?.groupValues?.get(1)
-            if (directM3u8 != null) {
-                lastUrl = directM3u8
+            val script = scripts.find { it.contains("sources:") }
+            if (script != null) {
+                val unpackedScript = getAndUnpack(script)
+                val decryptedUrl = decryptLocalUrl(unpackedScript)
+                lastUrl = decryptedUrl?.substringAfter("https")?.let { "https$it" }
+                if (lastUrl.isNullOrEmpty()) {
+                    lastUrl = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(script)?.groupValues?.get(1)
+                        ?: Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(unpackedScript)?.groupValues?.get(1)
+                }
             }
         }
 
@@ -268,12 +382,22 @@ class HDFilmCehennemi : MainAPI() {
             return
         }
 
-        Log.d("HDCH", "invokeLocalSource: Successfully extracted video URL: $lastUrl")
+        Log.d("HDCH", "invokeLocalSource: Final extracted M3U8 URL: $lastUrl")
 
-        val subData = script.substringAfter("tracks: [").substringBefore("]")
-        AppUtils.tryParseJson<List<SubSource>>("[${subData}]")?.filter { it.kind == "captions" }?.forEach {
-            val subtitleUrl = fixUrlNull(it.file) ?: return@forEach
-            subtitleCallback(newSubtitleFile(it.language.toString(), subtitleUrl))
+        val scriptWithSubtitles = scripts.find { it.contains("tracks:") || it.contains("captions") }
+        if (scriptWithSubtitles != null) {
+            val subData = scriptWithSubtitles.substringAfter("tracks: [").substringBefore("]")
+            AppUtils.tryParseJson<List<SubSource>>("[${subData}]")?.filter { it.kind == "captions" }?.forEach {
+                val subtitleUrl = fixUrlNull(it.file) ?: return@forEach
+                subtitleCallback(newSubtitleFile(it.language.toString(), subtitleUrl))
+            }
+        }
+
+        val refererHost = try {
+            val uri = URI(url)
+            "${uri.scheme}://${uri.host}/"
+        } catch (_: Exception) {
+            "${mainUrl}/"
         }
 
         callback.invoke(
@@ -283,7 +407,7 @@ class HDFilmCehennemi : MainAPI() {
                 url = lastUrl,
                 type = ExtractorLinkType.M3U8
             ) {
-                headers = mapOf("Referer" to "${mainUrl}/")
+                headers = mapOf("Referer" to refererHost)
                 quality = Qualities.Unknown.value
             }
         )
