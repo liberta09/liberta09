@@ -53,7 +53,7 @@ subprojects {
 
     dependencies {
         val cloudstream by configurations
-        cloudstream("com.github.recloudstream.cloudstream:library:-SNAPSHOT")
+        cloudstream("com.github.recloudstream.cloudstream:library:pre-release")
 
         add("implementation", "org.jsoup:jsoup:1.15.3")
         add("implementation", "com.squareup.okhttp3:okhttp:4.12.0")
