@@ -342,40 +342,35 @@ class HDFilmCehennemi : MainAPI() {
 
     private suspend fun invokeLocalSource(source: String, url: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
         Log.d("HDCH", "invokeLocalSource: Fetching embed URL: $url")
-        val response = app.get(url, referer = "${mainUrl}/", interceptor = interceptor)
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0",
+            "Referer" to "${mainUrl}/"
+        )
+        val response = app.get(url, headers = headers, interceptor = interceptor)
         Log.d("HDCH", "invokeLocalSource: HTTP Status Code: ${response.code}")
 
         val doc = response.document
         val scripts = doc.select("script").map { it.data() }
         Log.d("HDCH", "invokeLocalSource: Total script count in embed doc: ${scripts.size}")
 
-        scripts.forEachIndexed { index, scriptData ->
-            Log.d("HDCH", "Script #$index length: ${scriptData.length}")
-            val keywords = listOf("m3u8", "hls", "jwplayer", "file:", "sources", "tz9", "hhr7n")
-            if (keywords.any { scriptData.contains(it) }) {
-                Log.d("HDCH", "Script #$index matched keywords! Content: ${scriptData.take(2000)}")
-            }
-        }
-
         var lastUrl: String? = null
 
-        // 1. Try decryptHhr7n pattern (var tz9 = funcName("...".split("|")))
+        // 1. Try decryptHhr7n pattern (matches any pipe-separated string split by '|')
         for (script in scripts) {
-            if (script.contains("tz9") || script.contains(".split(\"|\")") || script.contains(".split('|')")) {
-                val match = Regex("""var\s+tz9\s*=\s*[a-zA-Z0-9_$]+\s*\(\s*["']([^"']+)["']\s*\.split\s*\(\s*["']\|["']\s*\)\s*\)""").find(script)
-                if (match != null) {
-                    val pipeStr = match.groupValues[1]
-                    val decrypted = decryptHhr7n(pipeStr.split("|"))
-                    if (!decrypted.isNullOrEmpty() && decrypted.startsWith("http")) {
-                        lastUrl = decrypted
-                        Log.d("HDCH", "invokeLocalSource: Decrypted via Hhr7n: $lastUrl")
-                        break
-                    }
+            val pipeMatches = Regex("""["']([^"']+\|[^\s"']+)["']\s*\.split\s*\(\s*["']\|["']\s*\)""").findAll(script)
+            for (match in pipeMatches) {
+                val pipeStr = match.groupValues[1]
+                val decrypted = decryptHhr7n(pipeStr.split("|"))
+                if (!decrypted.isNullOrEmpty() && decrypted.startsWith("http")) {
+                    lastUrl = decrypted
+                    Log.d("HDCH", "invokeLocalSource: Decrypted via Hhr7n: $lastUrl")
+                    break
                 }
             }
+            if (!lastUrl.isNullOrEmpty()) break
         }
 
-        // 2. Fallback: try old decryptLocalUrl or unpacked script
+        // 2. Fallback: try old decryptLocalUrl or unpacked script or direct m3u8
         if (lastUrl.isNullOrEmpty()) {
             val script = scripts.find { it.contains("sources:") }
             if (script != null) {
@@ -420,7 +415,10 @@ class HDFilmCehennemi : MainAPI() {
                 url = lastUrl,
                 type = ExtractorLinkType.M3U8
             ) {
-                headers = mapOf("Referer" to refererHost)
+                this.headers = mapOf(
+                    "Referer" to refererHost,
+                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0"
+                )
                 quality = Qualities.Unknown.value
             }
         )
@@ -460,14 +458,13 @@ class HDFilmCehennemi : MainAPI() {
 
                 Log.d("HDCH", "loadLinks: apiGet response (first 3000 chars): ${apiGet.take(3000)}")
 
-                var iframe = Regex("""data-src=\\"([^"]+)""").find(apiGet)?.groupValues?.get(1)?.replace("\\", "")
-                    ?: Regex("""src=\\"([^"]+)""").find(apiGet)?.groupValues?.get(1)?.replace("\\", "")
-                    ?: ""
+                val rawHtml = AppUtils.tryParseJson<HDFC>(apiGet)?.html ?: apiGet
 
-                if (iframe.isEmpty()) {
-                    val iframeDoc = Jsoup.parse(apiGet)
-                    iframe = fixUrlNull(iframeDoc.selectFirst("iframe")?.attr("data-src") ?: iframeDoc.selectFirst("iframe")?.attr("src")) ?: ""
-                }
+                val iframe = Regex("""data-src=\\"([^"]+)""").find(apiGet)?.groupValues?.get(1)?.replace("\\", "")
+                    ?: Regex("""src=\\"([^"]+)""").find(apiGet)?.groupValues?.get(1)?.replace("\\", "")
+                    ?: Jsoup.parse(rawHtml).selectFirst("iframe")?.attr("data-src")
+                    ?: Jsoup.parse(rawHtml).selectFirst("iframe")?.attr("src")
+                    ?: ""
 
                 if (iframe.isEmpty()) {
                     Log.d("HDCH", "loadLinks: FAILED - Could not find iframe URL in apiGet for videoID: $videoID")
