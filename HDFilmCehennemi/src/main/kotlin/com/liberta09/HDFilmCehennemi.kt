@@ -343,8 +343,20 @@ class HDFilmCehennemi : MainAPI() {
     private suspend fun invokeLocalSource(source: String, url: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
         Log.d("HDCH", "invokeLocalSource: Fetching embed URL: $url")
         val response = app.get(url, referer = "${mainUrl}/", interceptor = interceptor)
+        Log.d("HDCH", "invokeLocalSource: HTTP Status Code: ${response.code}")
+
         val doc = response.document
         val scripts = doc.select("script").map { it.data() }
+        Log.d("HDCH", "invokeLocalSource: Total script count in embed doc: ${scripts.size}")
+
+        scripts.forEachIndexed { index, scriptData ->
+            Log.d("HDCH", "Script #$index length: ${scriptData.length}")
+            val keywords = listOf("m3u8", "hls", "jwplayer", "file:", "sources", "tz9", "hhr7n")
+            if (keywords.any { scriptData.contains(it) }) {
+                Log.d("HDCH", "Script #$index matched keywords! Content: ${scriptData.take(2000)}")
+            }
+        }
+
         var lastUrl: String? = null
 
         // 1. Try decryptHhr7n pattern (var tz9 = funcName("...".split("|")))
@@ -378,11 +390,11 @@ class HDFilmCehennemi : MainAPI() {
         }
 
         if (lastUrl.isNullOrEmpty()) {
-            Log.d("HDCH", "invokeLocalSource: Could not extract M3U8 video URL for $url")
+            Log.d("HDCH", "invokeLocalSource: FAILED - M3U8 URL could not be extracted for url: $url")
             return
         }
 
-        Log.d("HDCH", "invokeLocalSource: Final extracted M3U8 URL: $lastUrl")
+        Log.d("HDCH", "invokeLocalSource: SUCCESS - Final extracted M3U8 URL: $lastUrl")
 
         val scriptWithSubtitles = scripts.find { it.contains("tracks:") || it.contains("captions") }
         if (scriptWithSubtitles != null) {
@@ -400,6 +412,7 @@ class HDFilmCehennemi : MainAPI() {
             "${mainUrl}/"
         }
 
+        Log.d("HDCH", "invokeLocalSource: Calling callback.invoke with M3U8 URL: $lastUrl")
         callback.invoke(
             newExtractorLink(
                 source = source,
@@ -419,14 +432,23 @@ class HDFilmCehennemi : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        Log.d("HDCH", "loadLinks: Started for page data: $data")
         val document = app.get(data, interceptor = interceptor).document
-        document.select("div.alternative-links").map { element ->
+        val altLinks = document.select("div.alternative-links")
+        Log.d("HDCH", "loadLinks: Found ${altLinks.size} div.alternative-links blocks")
+
+        altLinks.map { element ->
             element to element.attr("data-lang").uppercase()
         }.forEach { (element, langCode) ->
-            element.select("button.alternative-link").map { button ->
+            val buttons = element.select("button.alternative-link")
+            Log.d("HDCH", "loadLinks: Found ${buttons.size} button.alternative-link elements for lang $langCode")
+
+            buttons.map { button ->
                 button.text().replace("(HDrip Xbet)", "").trim() + " $langCode" to button.attr("data-video")
             }.forEach { (source, videoID) ->
+                Log.d("HDCH", "loadLinks: Processing source '$source' with videoID: '$videoID'")
                 if (videoID.isBlank()) return@forEach
+
                 val apiGet = app.get(
                     "${mainUrl}/video/$videoID/", interceptor = interceptor,
                     headers = mapOf(
@@ -435,6 +457,8 @@ class HDFilmCehennemi : MainAPI() {
                     ),
                     referer = data
                 ).text
+
+                Log.d("HDCH", "loadLinks: apiGet response (first 3000 chars): ${apiGet.take(3000)}")
 
                 var iframe = Regex("""data-src=\\"([^"]+)""").find(apiGet)?.groupValues?.get(1)?.replace("\\", "")
                     ?: Regex("""src=\\"([^"]+)""").find(apiGet)?.groupValues?.get(1)?.replace("\\", "")
@@ -446,12 +470,12 @@ class HDFilmCehennemi : MainAPI() {
                 }
 
                 if (iframe.isEmpty()) {
-                    Log.d("HDCH", "loadLinks: Could not find iframe URL for videoID: $videoID")
+                    Log.d("HDCH", "loadLinks: FAILED - Could not find iframe URL in apiGet for videoID: $videoID")
                     return@forEach
                 }
 
                 val fullIframeUrl = fixUrlNull(iframe) ?: return@forEach
-                Log.d("HDCH", "loadLinks: Extracted embed iframe URL: $fullIframeUrl")
+                Log.d("HDCH", "loadLinks: SUCCESS - Extracted embed iframe URL: $fullIframeUrl")
 
                 invokeLocalSource(source, fullIframeUrl, subtitleCallback, callback)
             }
