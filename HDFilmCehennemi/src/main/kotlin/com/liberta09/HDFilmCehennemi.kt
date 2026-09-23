@@ -393,25 +393,57 @@ class HDFilmCehennemi : MainAPI() {
             if (!lastUrl.isNullOrEmpty()) break
         }
 
-        // 2. Fallback: try decryptLocalUrl
+        // 2. Fallback: Rapidrame (Packed Eval) or decryptLocalUrl
         if (lastUrl.isNullOrEmpty()) {
             scripts.forEachIndexed { scriptIdx, script ->
-                if (script.contains("sources:")) {
-                    Log.d("HDCH", "Script #$scriptIdx contains 'sources:' -> Attempting getAndUnpack & decryptLocalUrl")
+                if (script.contains("eval(function(p,a,c,k,e,d)") || script.contains("sources:")) {
+                    Log.d("HDCH", "Script #$scriptIdx contains packed data or 'sources:' -> Attempting getAndUnpack")
                     val unpackedScript = getAndUnpack(script)
                     Log.d("HDCH", "Script #$scriptIdx unpacked length: ${unpackedScript.length}")
-                    val decryptedUrl = decryptLocalUrl(unpackedScript)
-                    Log.d("HDCH", "Script #$scriptIdx decryptLocalUrl result: $decryptedUrl")
-                    val candidate = decryptedUrl?.substringAfter("https")?.let { "https$it" }
+                    
+                    // a) Try decryptLocalUrl logic first
+                    var candidate = decryptLocalUrl(unpackedScript)
+                    if (candidate != null) {
+                        candidate = candidate.substringAfter("https").let { "https$it" }
+                    }
+
+                    // b) Try direct M3U8 regex in unpacked script
+                    if (candidate.isNullOrEmpty() || !candidate.startsWith("http")) {
+                        candidate = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(unpackedScript)?.groupValues?.get(1)
+                    }
+
+                    // c) Handle Rapidrame specific dynamic variable (e.g., sources: [{file:ui4j}])
+                    if (candidate.isNullOrEmpty() || !candidate.startsWith("http")) {
+                        val varMatch = Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*([a-zA-Z0-9_]+)\s*""").find(unpackedScript)
+                        if (varMatch != null) {
+                            val varName = varMatch.groupValues[1]
+                            Log.d("HDCH", "Found Rapidrame dynamic variable: $varName")
+                            
+                            // Look for var varName = "someUrl" or atob("someBase64")
+                            val varValueMatch = Regex("""$varName\s*=\s*["']([^"']+)["']""").find(unpackedScript)
+                                ?: Regex("""$varName\s*=\s*atob\s*\(\s*["']([^"']+)["']\s*\)""").find(unpackedScript)
+                            
+                            if (varValueMatch != null) {
+                                val extractedValue = varValueMatch.groupValues[1]
+                                // If it looks like base64 (no dot, no http, usually ends with =), decode it
+                                if (!extractedValue.contains("http") && !extractedValue.contains(".m3u8")) {
+                                    try {
+                                        candidate = String(Base64.decode(extractedValue, Base64.DEFAULT))
+                                        Log.d("HDCH", "Decoded Rapidrame atob/base64 value to: $candidate")
+                                    } catch (e: Exception) {
+                                        Log.e("HDCH", "Rapidrame base64 decode failed for $extractedValue: ${e.message}")
+                                    }
+                                } else {
+                                    candidate = extractedValue
+                                }
+                            }
+                        }
+                    }
+
                     if (!candidate.isNullOrEmpty() && candidate.startsWith("http")) {
                         lastUrl = candidate
-                    } else {
-                        val directM3u8 = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(script)?.groupValues?.get(1)
-                            ?: Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(unpackedScript)?.groupValues?.get(1)
-                        if (directM3u8 != null) {
-                            lastUrl = directM3u8
-                            Log.d("HDCH", "Script #$scriptIdx directM3u8 found: $directM3u8")
-                        }
+                        Log.d("HDCH", "Script #$scriptIdx successfully extracted Rapidrame URL: $lastUrl")
+                        return@forEachIndexed // Break out of inner loop
                     }
                 }
             }
