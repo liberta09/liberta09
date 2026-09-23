@@ -1,7 +1,7 @@
-import com.android.build.gradle.BaseExtension
+import com.android.build.gradle.LibraryExtension
 import com.lagradost.cloudstream3.gradle.CloudstreamExtension
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 buildscript {
     repositories {
@@ -10,9 +10,9 @@ buildscript {
         maven("https://jitpack.io")
     }
     dependencies {
-        classpath("com.android.tools.build:gradle:8.7.3")
+        classpath("com.android.tools.build:gradle:8.2.2")
         classpath("com.github.recloudstream:gradle:-SNAPSHOT")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.0")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.0.21")
     }
 }
 
@@ -27,55 +27,39 @@ allprojects {
 fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) =
     extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
 
-fun Project.android(configuration: BaseExtension.() -> Unit) =
-    extensions.getByName<BaseExtension>("android").configuration()
-
 subprojects {
     apply(plugin = "com.android.library")
-    apply(plugin = "kotlin-android")
     apply(plugin = "com.lagradost.cloudstream3.gradle")
+    apply(plugin = "kotlin-android")
 
-    cloudstream {
-        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "liberta09/liberta09")
-    }
-
-    android {
+    extensions.configure<LibraryExtension> {
+        compileSdk = 34
         namespace = "com.liberta09"
-
         defaultConfig {
             minSdk = 21
-            compileSdkVersion(35)
-            targetSdk = 35
         }
-
         compileOptions {
-            sourceCompatibility = JavaVersion.VERSION_1_8
-            targetCompatibility = JavaVersion.VERSION_1_8
+            sourceCompatibility = JavaVersion.VERSION_11
+            targetCompatibility = JavaVersion.VERSION_11
         }
+    }
 
-        tasks.withType<KotlinJvmCompile> {
-            compilerOptions {
-                jvmTarget.set(JvmTarget.JVM_1_8)
-                freeCompilerArgs.addAll(
-                    "-Xno-call-assertions",
-                    "-Xno-param-assertions",
-                    "-Xno-receiver-assertions"
-                )
-            }
+    tasks.withType<KotlinCompile>().configureEach {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_11)
+            freeCompilerArgs.add("-Xskip-metadata-version-check")
         }
     }
 
     dependencies {
         val cloudstream by configurations
-        val implementation by configurations
+        cloudstream("com.github.recloudstream.cloudstream:library:pre-release")
 
-        cloudstream("com.lagradost:cloudstream3:pre-release")
-
-        implementation(kotlin("stdlib"))
-        implementation("com.github.Blatzar:NiceHttp:0.4.18")
-        implementation("org.jsoup:jsoup:1.18.3")
-        // Do not bump Jackson above 2.13.1 — breaks older Android.
-        implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
+        add("implementation", "org.jsoup:jsoup:1.15.3")
+        add("implementation", "com.squareup.okhttp3:okhttp:4.12.0")
+        add("implementation", "com.fasterxml.jackson.core:jackson-databind:2.13.0")
+        add("implementation", "com.fasterxml.jackson.module:jackson-module-kotlin:2.13.0")
+        add("implementation", "com.github.Blatzar:NiceHttp:0.4.18")
     }
 }
 
