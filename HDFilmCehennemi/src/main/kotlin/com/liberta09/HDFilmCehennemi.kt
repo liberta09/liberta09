@@ -17,6 +17,7 @@ import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.net.URLDecoder
 
 class HDFilmCehennemi : MainAPI() {
     override var mainUrl = "https://www.hdfilmcehennemi.nl"
@@ -156,8 +157,96 @@ class HDFilmCehennemi : MainAPI() {
         }
     }
 
-    private suspend fun invokeLocalSource(source: String, url: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        Log.d("HDCH", "invokeLocalSource: Fetching embed URL: $url")
+    private fun safeBase64Decode(rawInput: String): String? {
+        try {
+            Log.d("HDCH", "safeBase64Decode raw input = $rawInput")
+            var cleaned = try {
+                URLDecoder.decode(rawInput, "UTF-8")
+            } catch (_: Exception) {
+                rawInput
+            }
+
+            cleaned = cleaned.replace("\\n", "")
+                .replace("\\r", "")
+                .replace("\\\"", "")
+                .replace("\\/", "/")
+                .replace("\"", "")
+                .replace("'", "")
+                .replace("\n", "")
+                .replace("\r", "")
+                .trim()
+
+            val base64Cleaned = cleaned.replace(Regex("""[^A-Za-z0-9+/=\-_]"""), "")
+            if (base64Cleaned.isEmpty()) return null
+
+            var padded = base64Cleaned
+            while (padded.length % 4 != 0) {
+                padded += "="
+            }
+
+            val decodedBytes = try {
+                Base64.decode(padded, Base64.DEFAULT or Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+            } catch (_: Exception) {
+                try {
+                    Base64.decode(padded, Base64.DEFAULT)
+                } catch (_: Exception) {
+                    Base64.decode(padded, Base64.URL_SAFE)
+                }
+            }
+
+            val result = String(decodedBytes, Charsets.UTF_8)
+            Log.d("HDCH", "safeBase64Decode decoded result = $result")
+            return result
+        } catch (e: Exception) {
+            Log.e("HDCH", "decryptLocalUrl Error: bad base-64 (${e.message})", e)
+            return null
+        }
+    }
+
+    private fun decryptLocalUrl(unpackedScript: String): String? {
+        try {
+            val partsMatch = """dc_\s*\(\s*\[\s*((?:['"][^'"]+['"]\s*,?\s*)+)\]\s*\)""".toRegex().find(unpackedScript)
+                ?: """dc\s*\(\s*\[\s*((?:['"][^'"]+['"]\s*,?\s*)+)\]\s*\)""".toRegex().find(unpackedScript)
+                ?: """\(\[\s*((?:['"][^'"]+['"]\s*,?\s*)+)\]\)""".toRegex().find(unpackedScript)
+
+            if (partsMatch != null) {
+                val rawParts = partsMatch.groupValues[1]
+                val parts = rawParts.split(",").map { 
+                    it.trim().trim('\'', '"').replace("\\/", "/") 
+                }
+                val joined = parts.joinToString("")
+                Log.d("HDCH", "decryptLocalUrl raw input from parts = $joined")
+
+                val decoded = safeBase64Decode(joined)
+                if (decoded != null && (decoded.contains("http") || decoded.contains(".m3u8"))) {
+                    return decoded
+                }
+            }
+
+            val atobMatch = """atob\s*\(\s*["']([^"']+)["']\s*\)""".toRegex().find(unpackedScript)
+            if (atobMatch != null) {
+                val rawAtob = atobMatch.groupValues[1]
+                val decoded = safeBase64Decode(rawAtob)
+                if (decoded != null && (decoded.contains("http") || decoded.contains(".m3u8"))) {
+                    return decoded
+                }
+            }
+
+            return null
+        } catch (e: Exception) {
+            Log.e("HDCH", "decryptLocalUrl Error: bad base-64 (${e.message})", e)
+            return null
+        }
+    }
+
+    private suspend fun invokeLocalSource(
+        source: String,
+        url: String,
+        videoID: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        Log.d("HDCH", "invokeLocalSource: Fetching embed URL: $url for videoID: $videoID")
         val headers = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0",
             "Referer" to "${mainUrl}/"
@@ -170,118 +259,123 @@ class HDFilmCehennemi : MainAPI() {
         Log.d("HDCH", "invokeLocalSource: Total script count in embed doc: ${rawScripts.size}")
 
         val scripts = rawScripts.map { script ->
-            if (script.contains("eval(function(p,a,c,k,e,")) getAndUnpack(script) else script
+            if (script.contains("eval(function(p,a,c,k,e,")) {
+                val unpacked = getAndUnpack(script)
+                Log.d("HDCH", "HDCH: Unpacked JS sample: ${unpacked.take(500)}")
+                unpacked
+            } else {
+                script
+            }
         }
 
         var lastUrl: String? = null
 
-        // Try extracting via the AST interpreter port (Streambox logic)
-        for (script in scripts) {
-            val pipeMatches = Regex("""["']([^"']+\|[^\s"']+)["']\s*\.split\s*\(\s*["']\|["']\s*\)""").findAll(script)
-            val partsMatch = pipeMatches.firstOrNull()
+        // 1. Direct Regex scanning on unpacked scripts for explicit M3U8 / TXT URLs
+        for ((scriptIdx, script) in scripts.withIndex()) {
+            val directM3u8 = Regex("""https?://[^\s"'<>]+\.(?:m3u8|txt)[^\s"'<>]*""").find(script)?.value
+                ?: Regex("""file\s*:\s*["'](https?://[^"']+)["']""").find(script)?.groupValues?.get(1)
             
-            if (partsMatch != null) {
-                val pipeStr = partsMatch.groupValues[1]
-                Log.d("HDCH", "HDCH: Rapidrame parts found = TRUE (length ${pipeStr.length})")
-                
-                val funcNameMatch = Regex("""([a-zA-Z0-9_$]+)\s*\(\s*["'][^"']+["']\s*\.split""").find(script)
-                val funcName = funcNameMatch?.groupValues?.get(1)?.trim()
-                
-                if (funcName != null) {
-                    var functionSource: String? = null
-                    val funcRegex = Regex("""function\s+$funcName\s*\([^)]*\)\s*\{""")
-                    
-                    for (s in scripts) {
-                        val startIdx = funcRegex.find(s)?.range?.first
-                        if (startIdx != null) {
-                            var braceCount = 0
-                            var endIdx = -1
-                            var inString = false
-                            var stringChar = ' '
-                            
-                            for (i in startIdx until s.length) {
-                                val c = s[i]
-                                if (!inString) {
-                                    if (c == '"' || c == '\'') {
-                                        inString = true
-                                        stringChar = c
-                                    } else if (c == '{') {
-                                        braceCount++
-                                    } else if (c == '}') {
-                                        braceCount--
-                                        if (braceCount == 0) {
-                                            endIdx = i
-                                            break
-                                        }
-                                    }
-                                } else {
-                                    if (c == stringChar && s[i - 1] != '\\') {
-                                        inString = false
-                                    }
-                                }
-                            }
-                            
-                            if (endIdx != -1) {
-                                functionSource = s.substring(startIdx, endIdx + 1)
-                                break
-                            }
-                        }
-                    }
-                    
-                    if (functionSource != null) {
-                        Log.d("HDCH", "HDCH: Decoder function found = TRUE")
-                        Log.d("HDCH", "HDCH: Decoder function name = $funcName")
-                        Log.d("HDCH", "HDCH: Decoder execution started")
-                        
-                        try {
-                            val decoded = runRapidrameDecoder(functionSource, pipeStr.split("|"))
-                            if (decoded != null) {
-                                Log.d("HDCH", "HDCH: Decoder result = $decoded")
-                                lastUrl = decoded
-                                break
-                            } else {
-                                Log.d("HDCH", "HDCH: Decoder execution FAILED = returned null")
-                            }
-                        } catch (e: Exception) {
-                            Log.d("HDCH", "HDCH: Decoder execution FAILED = ${e.message}")
-                        }
-                    } else {
-                        Log.d("HDCH", "HDCH: Decoder function found = FALSE (name: $funcName)")
-                    }
-                }
+            if (directM3u8 != null) {
+                lastUrl = directM3u8
+                Log.d("HDCH", "HDCH: Direct M3U8 URL found in script #$scriptIdx: $lastUrl")
+                break
             }
         }
 
-        // Fallback: Try direct M3U8 regex in unpacked script
+        // 2. Variable-based JS Decoder Analysis (Streambox interpreter flow)
         if (lastUrl.isNullOrEmpty()) {
-            for (script in scripts) {
-                if (script.contains("sources:")) {
-                    val directM3u8 = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(script)?.groupValues?.get(1)
-                    if (directM3u8 != null) {
-                        lastUrl = directM3u8
-                        break
-                    }
-                    
-                    val varMatch = Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*([a-zA-Z0-9_]+)\s*""").find(script)
-                    if (varMatch != null) {
-                        val varName = varMatch.groupValues[1]
-                        val varValueMatch = Regex("""$varName\s*=\s*["']([^"']+)["']""").find(script)
-                            ?: Regex("""$varName\s*=\s*atob\s*\(\s*["']([^"']+)["']\s*\)""").find(script)
+            for ((scriptIdx, script) in scripts.withIndex()) {
+                val sourceVarMatch = Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*([a-zA-Z0-9_$]+)""").find(script)
+                    ?: Regex("""file\s*:\s*([a-zA-Z0-9_$]+)""").find(script)
+                
+                if (sourceVarMatch != null) {
+                    val sourceVar = sourceVarMatch.groupValues[1]
+                    Log.d("HDCH", "HDCH: Found source variable '$sourceVar' in script #$scriptIdx")
+
+                    // Search for assignment: var sourceVar = decoderName("pipe_string".split("|"))
+                    val assignmentMatch = Regex("""\b$sourceVar\s*=\s*([a-zA-Z0-9_$]+)\s*\(\s*["']([^"']+\|[^\s"']+)["']\s*\.split""").find(script)
+                    if (assignmentMatch != null) {
+                        val funcName = assignmentMatch.groupValues[1]
+                        val pipeStr = assignmentMatch.groupValues[2]
+                        Log.d("HDCH", "HDCH: Rapidrame parts found = TRUE for var $sourceVar (length ${pipeStr.length})")
+                        Log.d("HDCH", "HDCH: Decoder function name = $funcName")
+
+                        // Extract function body
+                        val funcRegex = Regex("""function\s+$funcName\s*\([^)]*\)\s*\{""")
+                        var functionSource: String? = null
+                        
+                        for (s in scripts) {
+                            val startIdx = funcRegex.find(s)?.range?.first
+                            if (startIdx != null) {
+                                var braceCount = 0
+                                var endIdx = -1
+                                var inString = false
+                                var stringChar = ' '
+                                
+                                for (i in startIdx until s.length) {
+                                    val c = s[i]
+                                    if (!inString) {
+                                        if (c == '"' || c == '\'') {
+                                            inString = true
+                                            stringChar = c
+                                        } else if (c == '{') {
+                                            braceCount++
+                                        } else if (c == '}') {
+                                            braceCount--
+                                            if (braceCount == 0) {
+                                                endIdx = i
+                                                break
+                                            }
+                                        }
+                                    } else {
+                                        if (c == stringChar && s[i - 1] != '\\') {
+                                            inString = false
+                                        }
+                                    }
+                                }
+                                
+                                if (endIdx != -1) {
+                                    functionSource = s.substring(startIdx, endIdx + 1)
+                                    break
+                                }
+                            }
+                        }
+
+                        if (functionSource != null) {
+                            Log.d("HDCH", "HDCH: Decoder function found = TRUE")
+                            Log.d("HDCH", "HDCH: Decoder execution started")
+                            try {
+                                val decoded = runRapidrameDecoder(functionSource, pipeStr.split("|"))
+                                if (decoded != null && (decoded.startsWith("http") || decoded.contains(".m3u8"))) {
+                                    Log.d("HDCH", "HDCH: Decoder result = $decoded")
+                                    lastUrl = decoded
+                                    break
+                                } else {
+                                    Log.d("HDCH", "HDCH: Decoder execution FAILED = returned non-http result: $decoded")
+                                }
+                            } catch (e: Exception) {
+                                Log.d("HDCH", "HDCH: Decoder execution FAILED = ${e.message}")
+                            }
+                        }
+                    } else {
+                        // Check if sourceVar is assigned a plain or Base64 string directly
+                        val varValueMatch = Regex("""\b$sourceVar\s*=\s*["']([^"']+)["']""").find(script)
+                            ?: Regex("""\b$sourceVar\s*=\s*atob\s*\(\s*["']([^"']+)["']\s*\)""").find(script)
                         
                         if (varValueMatch != null) {
                             val extractedValue = varValueMatch.groupValues[1]
-                            if (!extractedValue.contains("http") && !extractedValue.contains(".m3u8")) {
-                                try {
-                                    lastUrl = String(Base64.decode(extractedValue, Base64.DEFAULT))
-                                } catch (e: Exception) {
-                                    // Ignored
-                                }
-                            } else {
+                            if (extractedValue.startsWith("http")) {
                                 lastUrl = extractedValue
+                                break
+                            } else {
+                                val decoded = safeBase64Decode(extractedValue)
+                                if (decoded != null && decoded.startsWith("http")) {
+                                    lastUrl = decoded
+                                    break
+                                }
                             }
                         }
                     }
-                    if (!lastUrl.isNullOrEmpty()) break
                 }
             }
         }
@@ -314,21 +408,204 @@ class HDFilmCehennemi : MainAPI() {
             "${mainUrl}/"
         }
 
-        callback.invoke(
-            newExtractorLink(
-                source = source,
-                name = source,
-                url = lastUrl,
-                type = ExtractorLinkType.M3U8
-            ) {
-                this.headers = mapOf(
-                    "Referer" to refererHost,
-                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0"
-                )
-                quality = Qualities.Unknown.value
-            }
+        val originHost = try {
+            val uri = URI(url)
+            "${uri.scheme}://${uri.host}"
+        } catch (_: Exception) {
+            mainUrl
+        }
+
+        val streamHeaders = mapOf(
+            "Referer" to refererHost,
+            "Origin" to originHost,
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0",
+            "Accept" to "*/*",
+            "Sec-Fetch-Mode" to "cors",
+            "Sec-Fetch-Site" to "cross-site"
         )
+
+        var statusCode = -1
+        var contentType = "unknown"
+        var isValidM3u8 = false
+        var m3u8Text = ""
+
+        try {
+            val streamResponse = app.get(lastUrl, headers = streamHeaders, interceptor = interceptor)
+            statusCode = streamResponse.code
+            contentType = streamResponse.headers["Content-Type"] ?: "unknown"
+            m3u8Text = streamResponse.text
+            isValidM3u8 = m3u8Text.contains("#EXTM3U")
+        } catch (e: Exception) {
+            Log.e("HDCH", "DIAGNOSTIC - Fetching M3U8 failed: ${e.message}")
+        }
+
+        // Parse M3U8 variants
+        val variantList = mutableListOf<M3u8Variant>()
+        if (isValidM3u8 && m3u8Text.isNotBlank()) {
+            val lines = m3u8Text.lines()
+            var i = 0
+            while (i < lines.size) {
+                val line = lines[i].trim()
+                if (line.startsWith("#EXT-X-STREAM-INF:")) {
+                    val res = Regex("""RESOLUTION=(\d+x\d+)""").find(line)?.groupValues?.get(1) ?: "unknown"
+                    val bw = Regex("""BANDWIDTH=(\d+)""").find(line)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                    val codecs = Regex("""CODECS=["']([^"']+)["']""").find(line)?.groupValues?.get(1) ?: "unknown"
+
+                    val variantUrl = if (i + 1 < lines.size) {
+                        val nextLine = lines[i + 1].trim()
+                        if (nextLine.startsWith("http")) {
+                            nextLine
+                        } else if (nextLine.isNotBlank() && !nextLine.startsWith("#")) {
+                            val baseUrl = lastUrl.substringBeforeLast("/") + "/"
+                            baseUrl + nextLine
+                        } else ""
+                    } else ""
+
+                    val isH264 = !codecs.contains("hevc", ignoreCase = true) &&
+                                 !codecs.contains("hvc1", ignoreCase = true) &&
+                                 !codecs.contains("av01", ignoreCase = true) &&
+                                 !codecs.contains("vp9", ignoreCase = true)
+
+                    if (variantUrl.isNotBlank()) {
+                        variantList.add(M3u8Variant(res, bw, codecs, variantUrl, isH264))
+                    }
+                }
+                i++
+            }
+        }
+
+        // Output variant logcat format as requested
+        variantList.forEachIndexed { idx, v ->
+            Log.d("HDCH", "VARIANT #${idx + 1}:\nresolution=${v.resolution}\nbandwidth=${v.bandwidth}\ncodecs=${v.codecs}")
+        }
+
+        // Select the most compatible H.264 variant for LDPlayer / ExoPlayer compatibility
+        val selectedVariant = variantList.filter { it.isH264 }.maxByOrNull { it.bandwidth }
+            ?: variantList.maxByOrNull { it.bandwidth }
+
+        if (selectedVariant != null) {
+            Log.d("HDCH", "SELECTED VARIANT:\nurl=${selectedVariant.url}\nresolution=${selectedVariant.resolution}\nbandwidth=${selectedVariant.bandwidth}\ncodecs=${selectedVariant.codecs}")
+        } else {
+            Log.d("HDCH", "SELECTED VARIANT:\nurl=$lastUrl\nresolution=unknown\nbandwidth=0\ncodecs=unknown")
+        }
+
+        Log.d("HDCH", "PLAYER HEADERS:\nUser-Agent=${streamHeaders["User-Agent"]}\nOrigin=${streamHeaders["Origin"]}\nReferer=${streamHeaders["Referer"]}")
+
+        val targetPlayUrl = selectedVariant?.url ?: lastUrl
+
+        // Diagnostic test for the first segment (.ts / .m4s / .jpg)
+        var firstSegmentUrl = "unknown"
+        var segmentStatusCode = -1
+        var segmentContentType = "unknown"
+        var segmentSize = 0L
+        var segmentError = "none"
+
+        try {
+            val variantM3u8Text = if (selectedVariant != null) {
+                app.get(targetPlayUrl, headers = streamHeaders, interceptor = interceptor).text
+            } else {
+                m3u8Text
+            }
+
+            val segmentLine = variantM3u8Text.lines().map { it.trim() }.find {
+                it.isNotBlank() && !it.startsWith("#")
+            }
+
+            if (segmentLine != null) {
+                firstSegmentUrl = if (segmentLine.startsWith("http")) {
+                    segmentLine
+                } else {
+                    targetPlayUrl.substringBeforeLast("/") + "/" + segmentLine
+                }
+
+                val segResponse = app.get(firstSegmentUrl, headers = streamHeaders, interceptor = interceptor)
+                segmentStatusCode = segResponse.code
+                segmentContentType = segResponse.headers["Content-Type"] ?: "unknown"
+                segmentSize = segResponse.body.bytes().size.toLong()
+                if (segmentStatusCode !in 200..299) {
+                    segmentError = "HTTP $segmentStatusCode"
+                }
+            } else {
+                segmentError = "No segment line found in variant M3U8"
+            }
+        } catch (e: Exception) {
+            segmentError = e.message ?: "Exception fetching segment"
+            Log.e("HDCH", "Segment diagnostic error: ${e.message}")
+        }
+
+        Log.d("HDCH", "SELECTED VARIANT URL: $targetPlayUrl")
+        Log.d("HDCH", "FIRST SEGMENT URL: $firstSegmentUrl")
+        Log.d("HDCH", "SEGMENT HTTP STATUS: $segmentStatusCode")
+        Log.d("HDCH", "SEGMENT CONTENT-TYPE: $segmentContentType")
+        Log.d("HDCH", "SEGMENT SIZE: $segmentSize bytes")
+        Log.d("HDCH", "SEGMENT REQUEST HEADERS:\nUser-Agent=${streamHeaders["User-Agent"]}\nOrigin=${streamHeaders["Origin"]}\nReferer=${streamHeaders["Referer"]}")
+        Log.d("HDCH", "SEGMENT ERROR: $segmentError")
+
+        if (isValidM3u8) {
+            try {
+                val streams = M3u8Helper().m3u8Generation(M3u8Helper.M3u8Stream(targetPlayUrl, headers = streamHeaders))
+                if (streams.isNotEmpty()) {
+                    streams.forEach { stream ->
+                        callback.invoke(
+                            newExtractorLink(
+                                source = source,
+                                name = source,
+                                url = stream.streamUrl,
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.headers = streamHeaders
+                                this.quality = stream.quality ?: Qualities.Unknown.value
+                            }
+                        )
+                    }
+                } else {
+                    callback.invoke(
+                        newExtractorLink(
+                            source = source,
+                            name = source,
+                            url = targetPlayUrl,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.headers = streamHeaders
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                }
+            } catch (_: Exception) {
+                callback.invoke(
+                    newExtractorLink(
+                        source = source,
+                        name = source,
+                        url = targetPlayUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.headers = streamHeaders
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+            }
+        } else {
+            callback.invoke(
+                newExtractorLink(
+                    source = source,
+                    name = source,
+                    url = targetPlayUrl,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.headers = streamHeaders
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+        }
     }
+
+    private data class M3u8Variant(
+        val resolution: String,
+        val bandwidth: Long,
+        val codecs: String,
+        val url: String,
+        val isH264: Boolean
+    )
 
     override suspend fun loadLinks(
         data: String,
@@ -373,9 +650,19 @@ class HDFilmCehennemi : MainAPI() {
                 }
 
                 val fullIframeUrl = fixUrlNull(iframe) ?: return@forEach
-                Log.d("HDCH", "HDCH: AJAX file value = $fullIframeUrl")
+                Log.d("HDCH", "HDCH: Rapidrame URL = $fullIframeUrl")
 
-                invokeLocalSource(source, fullIframeUrl, subtitleCallback, callback)
+                var finalIframe = fullIframeUrl
+                if (finalIframe.contains("rapidrame") && finalIframe.contains("?rapidrame_id=")) {
+                    finalIframe = "${mainUrl}/rplayer/" + finalIframe.substringAfter("?rapidrame_id=")
+                } else if (finalIframe.contains("mobi")) {
+                    val iframeDoc = Jsoup.parse(rawHtml)
+                    finalIframe = fixUrlNull(iframeDoc.selectFirst("iframe")?.attr("data-src")) ?: finalIframe
+                }
+
+                Log.d("HDCH", "HDCH: /rplayer/ URL = $finalIframe")
+
+                invokeLocalSource(source, finalIframe, videoID, subtitleCallback, callback)
             }
         }
         return true
