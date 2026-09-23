@@ -1,0 +1,8 @@
+{
+  "name": "liberta09",
+  "description": "liberta09 Eklenti Deposu",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/liberta09/liberta09/builds/plugins.json"
+  ]
+}

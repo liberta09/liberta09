@@ -1,11 +1,11 @@
 [
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=hdfilmcehennemi.nl&sz=%size%",
-        "fileHash": "sha256-5b3b472d720caaf92b9673ef91cf571d754b5d90ff81fd7f6707aedc2d75b7e7",
+        "fileHash": "sha256-65fb77f23273057b046c8be7bc4080fc3380ed358d7dc57d35f69f3c40eb9a4a",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/liberta09/liberta09",
         "fileSize": 73399,
-        "status": 3,
+        "status": 1,
         "language": "tr",
         "authors": [
             "liberta09"
@@ -14,7 +14,7 @@
             "Movie",
             "TvSeries"
         ],
-        "version": 52,
+        "version": 53,
         "internalName": "HDFilmCehennemi",
         "description": "T\u00fcrkiye'nin en h\u0131zl\u0131 hd film izleme sitesi",
         "url": "https://raw.githubusercontent.com/liberta09/liberta09/builds/HDFilmCehennemi.cs3",
