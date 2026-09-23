@@ -28,22 +28,17 @@ jobs:
           distribution: "zulu"
           java-version: "17"
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
       - name: Build Plugins
-        run: ./gradlew makePlugins makePluginsJson
+        run: ./gradlew makePlugins
 
-      - name: Collect plugin artifacts
+      - name: Copy CS3 plugins to build directory
         run: |
           mkdir -p ./build
           find . -type f -name "*.cs3" -exec cp {} ./build/ \;
-          if [ -f ./build/plugins.json ]; then true; fi
-          find . -path ./build -prune -o -name plugins.json -print | head -n 1 | xargs -I{} cp {} ./build/plugins.json || true
-          cp repo.json ./build/repo.json
+          cp repo.json ./build/repo.json || true
 
       - name: Deploy to builds branch
         uses: peaceiris/actions-gh-pages@v3
