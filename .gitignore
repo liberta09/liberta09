@@ -9,3 +9,9 @@ build/
 /.captures
 .externalNativeBuild
 .cxx
+.vscode
+gradle/gradle-daemon-jvm.properties
+gradle/libs.versions.toml
+rapidrameScript.ts
+rawScript.ts
+WebPlayerService.ts

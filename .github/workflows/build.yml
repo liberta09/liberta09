@@ -1,10 +1,16 @@
 name: Build and Publish Plugins
 
+concurrency:
+  group: build
+  cancel-in-progress: true
+
 on:
   push:
     branches:
       - master
       - main
+    paths-ignore:
+      - "*.md"
   workflow_dispatch:
 
 jobs:
@@ -19,18 +25,25 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
-          java-version: '17'
+          distribution: "zulu"
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
       - name: Build Plugins
-        run: ./gradlew makePlugins
+        run: ./gradlew makePlugins makePluginsJson
 
-      - name: Copy CS3 plugins to build directory
+      - name: Collect plugin artifacts
         run: |
+          mkdir -p ./build
           find . -type f -name "*.cs3" -exec cp {} ./build/ \;
+          if [ -f ./build/plugins.json ]; then true; fi
+          find . -path ./build -prune -o -name plugins.json -print | head -n 1 | xargs -I{} cp {} ./build/plugins.json || true
+          cp repo.json ./build/repo.json
 
       - name: Deploy to builds branch
         uses: peaceiris/actions-gh-pages@v3
