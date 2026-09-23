@@ -156,190 +156,6 @@ class HDFilmCehennemi : MainAPI() {
         }
     }
 
-    data class DecOp(val name: String, val rotShift: Int = 0)
-
-    private fun decryptLocalUrl(unpackedScript: String): String? {
-        try {
-            val partsMatch = """\(\[\s*((?:['"][^'"]+['"]\s*,?\s*)+)\]\)""".toRegex().find(unpackedScript)
-            val parts = partsMatch?.groupValues?.get(1)?.split(",")?.map { 
-                it.trim().trim('\'', '"').replace("\\/", "/") 
-            } ?: return null
-
-            val moduloMatch = """(\d+)\s*%\s*\(i\s*\+\s*(\d+)\)""".toRegex().find(unpackedScript)
-            val magicNum = moduloMatch?.groupValues?.get(1)?.toLongOrNull() ?: 399756995L
-            val magicOffset = moduloMatch?.groupValues?.get(2)?.toIntOrNull() ?: 5
-            val funcBody = unpackedScript.substringAfter("function dc_").substringBefore("function d1x")
-            val operations = mutableListOf<Pair<Int, DecOp>>()
-
-            var index = funcBody.indexOf("atob(")
-            while (index >= 0) {
-                operations.add(Pair(index, DecOp("atob")))
-                index = funcBody.indexOf("atob(", index + 1)
-            }
-            index = funcBody.indexOf("reverse")
-            while (index >= 0) {
-                operations.add(Pair(index, DecOp("reverse")))
-                index = funcBody.indexOf("reverse", index + 1)
-            }
-            index = funcBody.indexOf("replace")
-            while (index >= 0) {
-                val block = funcBody.substring(index, minOf(index + 300, funcBody.length))
-                var shift = 13
-                val rotShiftMatch = """charCodeAt\(0\)\s*\+\s*(\d+)""".toRegex().find(block)
-                if (rotShiftMatch != null) {
-                    shift = rotShiftMatch.groupValues[1].toInt()
-                } else {
-                    val rotShiftMatch2 = """o\s*-\s*base\s*([+-])\s*(\d+)""".toRegex().find(block)
-                    if (rotShiftMatch2 != null) {
-                        val sign = rotShiftMatch2.groupValues[1]
-                        val num = rotShiftMatch2.groupValues[2].toInt()
-                        shift = if (sign == "-") (26 - num) % 26 else num
-                    }
-                }
-                operations.add(Pair(index, DecOp("rot", shift)))
-                index = funcBody.indexOf("replace", index + 1)
-            }
-
-            operations.sortBy { it.first }
-            var result = parts.joinToString("")
-
-            for (op in operations) {
-                val action = op.second
-                when (action.name) {
-                    "reverse" -> result = result.reversed()
-                    "atob" -> {
-                        var paddedResult = result
-                        while (paddedResult.length % 4 != 0) paddedResult += "="
-                        result = String(Base64.decode(paddedResult, Base64.NO_WRAP), Charsets.ISO_8859_1)
-                    }
-                    "rot" -> {
-                        val rotShift = action.rotShift
-                        val rot = StringBuilder()
-                        for (c in result) {
-                            if (c in 'a'..'z') {
-                                val shifted = c.code + rotShift
-                                rot.append(if (shifted > 'z'.code) (shifted - 26).toChar() else shifted.toChar())
-                            } else if (c in 'A'..'Z') {
-                                val shifted = c.code + rotShift
-                                rot.append(if (shifted > 'Z'.code) (shifted - 26).toChar() else shifted.toChar())
-                            } else {
-                                rot.append(c)
-                            }
-                        }
-                        result = rot.toString()
-                    }
-                }
-            }
-
-            val unmix = StringBuilder()
-            for (i in result.indices) {
-                val charCode = result[i].code.toLong()
-                val decryptedCode = (charCode - (magicNum % (i + magicOffset)) + 256) % 256
-                unmix.append(decryptedCode.toInt().toChar())
-            }
-            return unmix.toString()
-        } catch (e: Exception) {
-            Log.e("HDCH", "decryptLocalUrl Error: ${e.message}")
-            return null
-        }
-    }
-
-    private fun decryptHhr7n(w1rhList: List<String>): String? {
-        try {
-            val w1rh = w1rhList.toMutableList()
-            val p3kInitial = w1rh.size - 2
-            val yl5d = p3kInitial % 7
-            val o5c47 = 8 + (p3kInitial % 5)
-
-            if (o5c47 >= w1rh.size || yl5d >= w1rh.size - 1) return null
-
-            val ex7r1 = w1rh.removeAt(o5c47)
-            val l12c = w1rh.removeAt(yl5d)
-            var yl7o = w1rh.joinToString("")
-
-            if (ex7r1.length > 2048) {
-                yl7o = yl7o.reversed()
-            }
-
-            var j6285 = 0
-            var pu9wu = 0
-            for (j0vg in l12c.indices) {
-                val qg5 = l12c[j0vg].code
-                j6285 = (j6285 * 37 + qg5) % 241
-                pu9wu = (pu9wu + ((qg5 shl 1) xor j0vg)) and 255
-            }
-
-            val e4ik = (j6285 * 3 + pu9wu) % 256
-            val cnm5 = (pu9wu % 11) + 5
-            var qd8 = ((pu9wu * 251 + j6285) % 65519) + 1
-
-            for (j0vg in ex7r1.length - 1 downTo 0) {
-                val w8q = ex7r1[j0vg]
-                if (w8q == '7') {
-                    var padded = yl7o
-                    while (padded.length % 4 != 0) padded += "="
-                    yl7o = String(Base64.decode(padded, Base64.NO_WRAP), Charsets.ISO_8859_1)
-                } else if (w8q == '3') {
-                    yl7o = yl7o.reversed()
-                } else {
-                    val uve0 = (26 - ((w8q.code - 96) % 26)) % 26
-                    val sb = StringBuilder()
-                    for (c in yl7o) {
-                        if (c in 'a'..'z') {
-                            val base = 'a'.code
-                            val shifted = (c.code - base + uve0) % 26 + base
-                            sb.append(shifted.toChar())
-                        } else if (c in 'A'..'Z') {
-                            val base = 'A'.code
-                            val shifted = (c.code - base + uve0) % 26 + base
-                            sb.append(shifted.toChar())
-                        } else {
-                            sb.append(c)
-                        }
-                    }
-                    yl7o = sb.toString()
-                }
-            }
-
-            if (l12c.length > 4096) {
-                var padded = yl7o
-                while (padded.length % 4 != 0) padded += "="
-                yl7o = String(Base64.decode(padded, Base64.NO_WRAP), Charsets.ISO_8859_1)
-            }
-
-            val p3k = yl7o.length
-            val t27s9 = IntArray(p3k)
-            for (j0vg in p3k - 1 downTo 1) {
-                qd8 = (qd8 * 97 + 41) % 65519
-                t27s9[j0vg] = qd8 % (j0vg + 1)
-            }
-
-            val t9pi = yl7o.toCharArray()
-            for (j0vg in 1 until p3k) {
-                val w8fu = t27s9[j0vg]
-                val kz8 = t9pi[j0vg]
-                t9pi[j0vg] = t9pi[w8fu]
-                t9pi[w8fu] = kz8
-            }
-            yl7o = String(t9pi)
-
-            var z6l = e4ik
-            val p1j3 = StringBuilder()
-            for (j0vg in yl7o.indices) {
-                val qg5 = yl7o[j0vg].code
-                z6l = (z6l * 5 + cnm5) % 256
-                val decryptedChar = qg5 xor z6l
-                p1j3.append(decryptedChar.toChar())
-                z6l = (z6l + qg5) % 256
-            }
-
-            return p1j3.toString()
-        } catch (e: Exception) {
-            Log.e("HDCH", "decryptHhr7n Error: ${e.message}")
-            return null
-        }
-    }
-
     private suspend fun invokeLocalSource(source: String, url: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
         Log.d("HDCH", "invokeLocalSource: Fetching embed URL: $url")
         val headers = mapOf(
@@ -350,101 +166,122 @@ class HDFilmCehennemi : MainAPI() {
         Log.d("HDCH", "invokeLocalSource: HTTP Status Code: ${response.code}")
 
         val doc = response.document
-        val scripts = doc.select("script").map { it.data() }
-        Log.d("HDCH", "invokeLocalSource: Total script count in embed doc: ${scripts.size}")
+        val rawScripts = doc.select("script").map { it.data() }
+        Log.d("HDCH", "invokeLocalSource: Total script count in embed doc: ${rawScripts.size}")
 
-        val targetKeywords = listOf("m3u8", ".m3u8", "file:", "sources:", "jwplayer", "setup", "playlist", "source", "atob", "btoa", "base64", "decode", "decrypt", "eval", "Function(", "tz9", "hhr7n", "rapidrame", "window", "document", "Blob", "URL.createObjectURL")
-
-        scripts.forEachIndexed { index, scriptData ->
-            val scriptNum = index + 1
-            Log.d("HDCH", "=== SCRIPT #$scriptNum (Length: ${scriptData.length}) ===")
-            val matchedKeywords = targetKeywords.filter { scriptData.contains(it, ignoreCase = true) }
-            if (matchedKeywords.isNotEmpty()) {
-                Log.d("HDCH", "SCRIPT #$scriptNum MATCHED KEYWORDS: $matchedKeywords")
-                matchedKeywords.distinct().forEach { kw ->
-                    val pos = scriptData.indexOf(kw, ignoreCase = true)
-                    if (pos >= 0) {
-                        val start = maxOf(0, pos - 200)
-                        val end = minOf(scriptData.length, pos + 800)
-                        val snippet = scriptData.substring(start, end)
-                        Log.d("HDCH", "SCRIPT #$scriptNum SNIPPET around '$kw': $snippet")
-                    }
-                }
-            } else {
-                Log.d("HDCH", "SCRIPT #$scriptNum: No target keywords found")
-            }
+        val scripts = rawScripts.map { script ->
+            if (script.contains("eval(function(p,a,c,k,e,")) getAndUnpack(script) else script
         }
 
         var lastUrl: String? = null
 
-        // 1. Try decryptHhr7n pattern
+        // Try extracting via the AST interpreter port (Streambox logic)
         for (script in scripts) {
             val pipeMatches = Regex("""["']([^"']+\|[^\s"']+)["']\s*\.split\s*\(\s*["']\|["']\s*\)""").findAll(script)
-            for (match in pipeMatches) {
-                val pipeStr = match.groupValues[1]
-                Log.d("HDCH", "HDCH: Embedded JS value found = $pipeStr")
-                val decrypted = decryptHhr7n(pipeStr.split("|"))
-                Log.d("HDCH", "HDCH: Decoded value = $decrypted")
-                if (!decrypted.isNullOrEmpty() && decrypted.startsWith("http")) {
-                    lastUrl = decrypted
-                    break
-                }
-            }
-            if (!lastUrl.isNullOrEmpty()) break
-        }
-
-        // 2. Fallback: Rapidrame (Packed Eval) or decryptLocalUrl
-        if (lastUrl.isNullOrEmpty()) {
-            scripts.forEachIndexed { scriptIdx, script ->
-                if (script.contains("eval(function(p,a,c,k,e,d)") || script.contains("sources:")) {
-                    Log.d("HDCH", "Script #$scriptIdx contains packed data or 'sources:' -> Attempting getAndUnpack")
-                    val unpackedScript = getAndUnpack(script)
-                    Log.d("HDCH", "Script #$scriptIdx unpacked length: ${unpackedScript.length}")
+            val partsMatch = pipeMatches.firstOrNull()
+            
+            if (partsMatch != null) {
+                val pipeStr = partsMatch.groupValues[1]
+                Log.d("HDCH", "HDCH: Rapidrame parts found = TRUE (length ${pipeStr.length})")
+                
+                val funcNameMatch = Regex("""([a-zA-Z0-9_$]+)\s*\(\s*["'][^"']+["']\s*\.split""").find(script)
+                val funcName = funcNameMatch?.groupValues?.get(1)?.trim()
+                
+                if (funcName != null) {
+                    var functionSource: String? = null
+                    val funcRegex = Regex("""function\s+$funcName\s*\([^)]*\)\s*\{""")
                     
-                    // a) Try decryptLocalUrl logic first
-                    var candidate = decryptLocalUrl(unpackedScript)
-                    if (candidate != null) {
-                        candidate = candidate.substringAfter("https").let { "https$it" }
-                    }
-
-                    // b) Try direct M3U8 regex in unpacked script
-                    if (candidate.isNullOrEmpty() || !candidate.startsWith("http")) {
-                        candidate = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(unpackedScript)?.groupValues?.get(1)
-                    }
-
-                    // c) Handle Rapidrame specific dynamic variable (e.g., sources: [{file:ui4j}])
-                    if (candidate.isNullOrEmpty() || !candidate.startsWith("http")) {
-                        val varMatch = Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*([a-zA-Z0-9_]+)\s*""").find(unpackedScript)
-                        if (varMatch != null) {
-                            val varName = varMatch.groupValues[1]
-                            Log.d("HDCH", "Found Rapidrame dynamic variable: $varName")
+                    for (s in scripts) {
+                        val startIdx = funcRegex.find(s)?.range?.first
+                        if (startIdx != null) {
+                            var braceCount = 0
+                            var endIdx = -1
+                            var inString = false
+                            var stringChar = ' '
                             
-                            // Look for var varName = "someUrl" or atob("someBase64")
-                            val varValueMatch = Regex("""$varName\s*=\s*["']([^"']+)["']""").find(unpackedScript)
-                                ?: Regex("""$varName\s*=\s*atob\s*\(\s*["']([^"']+)["']\s*\)""").find(unpackedScript)
-                            
-                            if (varValueMatch != null) {
-                                val extractedValue = varValueMatch.groupValues[1]
-                                // If it looks like base64 (no dot, no http, usually ends with =), decode it
-                                if (!extractedValue.contains("http") && !extractedValue.contains(".m3u8")) {
-                                    try {
-                                        candidate = String(Base64.decode(extractedValue, Base64.DEFAULT))
-                                        Log.d("HDCH", "Decoded Rapidrame atob/base64 value to: $candidate")
-                                    } catch (e: Exception) {
-                                        Log.e("HDCH", "Rapidrame base64 decode failed for $extractedValue: ${e.message}")
+                            for (i in startIdx until s.length) {
+                                val c = s[i]
+                                if (!inString) {
+                                    if (c == '"' || c == '\'') {
+                                        inString = true
+                                        stringChar = c
+                                    } else if (c == '{') {
+                                        braceCount++
+                                    } else if (c == '}') {
+                                        braceCount--
+                                        if (braceCount == 0) {
+                                            endIdx = i
+                                            break
+                                        }
                                     }
                                 } else {
-                                    candidate = extractedValue
+                                    if (c == stringChar && s[i - 1] != '\\') {
+                                        inString = false
+                                    }
                                 }
+                            }
+                            
+                            if (endIdx != -1) {
+                                functionSource = s.substring(startIdx, endIdx + 1)
+                                break
                             }
                         }
                     }
-
-                    if (!candidate.isNullOrEmpty() && candidate.startsWith("http")) {
-                        lastUrl = candidate
-                        Log.d("HDCH", "Script #$scriptIdx successfully extracted Rapidrame URL: $lastUrl")
-                        return@forEachIndexed // Break out of inner loop
+                    
+                    if (functionSource != null) {
+                        Log.d("HDCH", "HDCH: Decoder function found = TRUE")
+                        Log.d("HDCH", "HDCH: Decoder function name = $funcName")
+                        Log.d("HDCH", "HDCH: Decoder execution started")
+                        
+                        try {
+                            val decoded = runRapidrameDecoder(functionSource, pipeStr.split("|"))
+                            if (decoded != null) {
+                                Log.d("HDCH", "HDCH: Decoder result = $decoded")
+                                lastUrl = decoded
+                                break
+                            } else {
+                                Log.d("HDCH", "HDCH: Decoder execution FAILED = returned null")
+                            }
+                        } catch (e: Exception) {
+                            Log.d("HDCH", "HDCH: Decoder execution FAILED = ${e.message}")
+                        }
+                    } else {
+                        Log.d("HDCH", "HDCH: Decoder function found = FALSE (name: $funcName)")
                     }
+                }
+            }
+        }
+
+        // Fallback: Try direct M3U8 regex in unpacked script
+        if (lastUrl.isNullOrEmpty()) {
+            for (script in scripts) {
+                if (script.contains("sources:")) {
+                    val directM3u8 = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(script)?.groupValues?.get(1)
+                    if (directM3u8 != null) {
+                        lastUrl = directM3u8
+                        break
+                    }
+                    
+                    val varMatch = Regex("""sources\s*:\s*\[\s*\{\s*file\s*:\s*([a-zA-Z0-9_]+)\s*""").find(script)
+                    if (varMatch != null) {
+                        val varName = varMatch.groupValues[1]
+                        val varValueMatch = Regex("""$varName\s*=\s*["']([^"']+)["']""").find(script)
+                            ?: Regex("""$varName\s*=\s*atob\s*\(\s*["']([^"']+)["']\s*\)""").find(script)
+                        
+                        if (varValueMatch != null) {
+                            val extractedValue = varValueMatch.groupValues[1]
+                            if (!extractedValue.contains("http") && !extractedValue.contains(".m3u8")) {
+                                try {
+                                    lastUrl = String(Base64.decode(extractedValue, Base64.DEFAULT))
+                                } catch (e: Exception) {
+                                    // Ignored
+                                }
+                            } else {
+                                lastUrl = extractedValue
+                            }
+                        }
+                    }
+                    if (!lastUrl.isNullOrEmpty()) break
                 }
             }
         }
