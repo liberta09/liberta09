@@ -353,43 +353,81 @@ class HDFilmCehennemi : MainAPI() {
         val scripts = doc.select("script").map { it.data() }
         Log.d("HDCH", "invokeLocalSource: Total script count in embed doc: ${scripts.size}")
 
+        val targetKeywords = listOf("m3u8", ".m3u8", "file:", "sources:", "jwplayer", "setup", "playlist", "source", "atob", "btoa", "base64", "decode", "decrypt", "eval", "Function(", "tz9", "hhr7n", "rapidrame", "window", "document", "Blob", "URL.createObjectURL")
+
+        scripts.forEachIndexed { index, scriptData ->
+            val scriptNum = index + 1
+            Log.d("HDCH", "=== SCRIPT #$scriptNum (Length: ${scriptData.length}) ===")
+            val matchedKeywords = targetKeywords.filter { scriptData.contains(it, ignoreCase = true) }
+            if (matchedKeywords.isNotEmpty()) {
+                Log.d("HDCH", "SCRIPT #$scriptNum MATCHED KEYWORDS: $matchedKeywords")
+                matchedKeywords.distinct().forEach { kw ->
+                    val pos = scriptData.indexOf(kw, ignoreCase = true)
+                    if (pos >= 0) {
+                        val start = maxOf(0, pos - 200)
+                        val end = minOf(scriptData.length, pos + 800)
+                        val snippet = scriptData.substring(start, end)
+                        Log.d("HDCH", "SCRIPT #$scriptNum SNIPPET around '$kw': $snippet")
+                    }
+                }
+            } else {
+                Log.d("HDCH", "SCRIPT #$scriptNum: No target keywords found")
+            }
+        }
+
         var lastUrl: String? = null
 
-        // 1. Try decryptHhr7n pattern (matches any pipe-separated string split by '|')
+        // 1. Try decryptHhr7n pattern
         for (script in scripts) {
             val pipeMatches = Regex("""["']([^"']+\|[^\s"']+)["']\s*\.split\s*\(\s*["']\|["']\s*\)""").findAll(script)
             for (match in pipeMatches) {
                 val pipeStr = match.groupValues[1]
+                Log.d("HDCH", "HDCH: Embedded JS value found = $pipeStr")
                 val decrypted = decryptHhr7n(pipeStr.split("|"))
+                Log.d("HDCH", "HDCH: Decoded value = $decrypted")
                 if (!decrypted.isNullOrEmpty() && decrypted.startsWith("http")) {
                     lastUrl = decrypted
-                    Log.d("HDCH", "invokeLocalSource: Decrypted via Hhr7n: $lastUrl")
                     break
                 }
             }
             if (!lastUrl.isNullOrEmpty()) break
         }
 
-        // 2. Fallback: try old decryptLocalUrl or unpacked script or direct m3u8
+        // 2. Fallback: try decryptLocalUrl
         if (lastUrl.isNullOrEmpty()) {
-            val script = scripts.find { it.contains("sources:") }
-            if (script != null) {
-                val unpackedScript = getAndUnpack(script)
-                val decryptedUrl = decryptLocalUrl(unpackedScript)
-                lastUrl = decryptedUrl?.substringAfter("https")?.let { "https$it" }
-                if (lastUrl.isNullOrEmpty()) {
-                    lastUrl = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(script)?.groupValues?.get(1)
-                        ?: Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(unpackedScript)?.groupValues?.get(1)
+            scripts.forEachIndexed { scriptIdx, script ->
+                if (script.contains("sources:")) {
+                    Log.d("HDCH", "Script #$scriptIdx contains 'sources:' -> Attempting getAndUnpack & decryptLocalUrl")
+                    val unpackedScript = getAndUnpack(script)
+                    Log.d("HDCH", "Script #$scriptIdx unpacked length: ${unpackedScript.length}")
+                    val decryptedUrl = decryptLocalUrl(unpackedScript)
+                    Log.d("HDCH", "Script #$scriptIdx decryptLocalUrl result: $decryptedUrl")
+                    val candidate = decryptedUrl?.substringAfter("https")?.let { "https$it" }
+                    if (!candidate.isNullOrEmpty() && candidate.startsWith("http")) {
+                        lastUrl = candidate
+                    } else {
+                        val directM3u8 = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(script)?.groupValues?.get(1)
+                            ?: Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(unpackedScript)?.groupValues?.get(1)
+                        if (directM3u8 != null) {
+                            lastUrl = directM3u8
+                            Log.d("HDCH", "Script #$scriptIdx directM3u8 found: $directM3u8")
+                        }
+                    }
                 }
             }
         }
 
         if (lastUrl.isNullOrEmpty()) {
-            Log.d("HDCH", "invokeLocalSource: FAILED - M3U8 URL could not be extracted for url: $url")
+            Log.d("HDCH", "invokeLocalSource FAILED: Could not extract video URL for $url")
             return
         }
 
-        Log.d("HDCH", "invokeLocalSource: SUCCESS - Final extracted M3U8 URL: $lastUrl")
+        if (!lastUrl.contains(".m3u8") && !lastUrl.contains(".txt") && !lastUrl.contains("master")) {
+            Log.d("HDCH", "Final URL ($lastUrl) does not end with .m3u8/master.txt. ExtractorLink skipped.")
+            return
+        }
+
+        Log.d("HDCH", "HDCH: Final M3U8 URL = $lastUrl")
 
         val scriptWithSubtitles = scripts.find { it.contains("tracks:") || it.contains("captions") }
         if (scriptWithSubtitles != null) {
@@ -407,7 +445,6 @@ class HDFilmCehennemi : MainAPI() {
             "${mainUrl}/"
         }
 
-        Log.d("HDCH", "invokeLocalSource: Calling callback.invoke with M3U8 URL: $lastUrl")
         callback.invoke(
             newExtractorLink(
                 source = source,
@@ -433,18 +470,15 @@ class HDFilmCehennemi : MainAPI() {
         Log.d("HDCH", "loadLinks: Started for page data: $data")
         val document = app.get(data, interceptor = interceptor).document
         val altLinks = document.select("div.alternative-links")
-        Log.d("HDCH", "loadLinks: Found ${altLinks.size} div.alternative-links blocks")
 
         altLinks.map { element ->
             element to element.attr("data-lang").uppercase()
         }.forEach { (element, langCode) ->
             val buttons = element.select("button.alternative-link")
-            Log.d("HDCH", "loadLinks: Found ${buttons.size} button.alternative-link elements for lang $langCode")
 
             buttons.map { button ->
                 button.text().replace("(HDrip Xbet)", "").trim() + " $langCode" to button.attr("data-video")
             }.forEach { (source, videoID) ->
-                Log.d("HDCH", "loadLinks: Processing source '$source' with videoID: '$videoID'")
                 if (videoID.isBlank()) return@forEach
 
                 val apiGet = app.get(
@@ -456,8 +490,6 @@ class HDFilmCehennemi : MainAPI() {
                     referer = data
                 ).text
 
-                Log.d("HDCH", "loadLinks: apiGet response (first 3000 chars): ${apiGet.take(3000)}")
-
                 val rawHtml = AppUtils.tryParseJson<HDFC>(apiGet)?.html ?: apiGet
 
                 val iframe = Regex("""data-src=\\"([^"]+)""").find(apiGet)?.groupValues?.get(1)?.replace("\\", "")
@@ -467,12 +499,12 @@ class HDFilmCehennemi : MainAPI() {
                     ?: ""
 
                 if (iframe.isEmpty()) {
-                    Log.d("HDCH", "loadLinks: FAILED - Could not find iframe URL in apiGet for videoID: $videoID")
+                    Log.d("HDCH", "loadLinks FAILED: Could not find iframe URL in apiGet for videoID: $videoID")
                     return@forEach
                 }
 
                 val fullIframeUrl = fixUrlNull(iframe) ?: return@forEach
-                Log.d("HDCH", "loadLinks: SUCCESS - Extracted embed iframe URL: $fullIframeUrl")
+                Log.d("HDCH", "HDCH: AJAX file value = $fullIframeUrl")
 
                 invokeLocalSource(source, fullIframeUrl, subtitleCallback, callback)
             }
